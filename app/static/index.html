@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Checkin Hub</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="login" class="login-wrap hidden">
+  <form class="login-card" id="login-form">
+    <div class="brand"><span class="dot"></span>AI Checkin Hub</div>
+    <p class="muted">聚合签到 · 额度监控 · 模型目录</p>
+    <input type="password" id="password" placeholder="访问密码" autocomplete="current-password" required>
+    <button class="btn primary" type="submit">进入控制台</button>
+    <p class="hint" id="login-hint"></p>
+  </form>
+</div>
+
+<div id="app" class="shell hidden">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span><b>Checkin Hub</b></div>
+    <nav>
+      <a href="#overview" data-view="overview" class="nav-item active">概览</a>
+      <a href="#sites" data-view="sites" class="nav-item">站点</a>
+      <a href="#logs" data-view="logs" class="nav-item">日志</a>
+      <a href="#settings" data-view="settings" class="nav-item">设置</a>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="btn ghost sm" id="btn-checkin-all">一键全签</button>
+      <button class="btn ghost sm" id="btn-logout">退出</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="view-title">概览</h1>
+      <div class="topbar-actions">
+        <span class="pill" id="tz-pill">--</span>
+        <button class="btn primary sm" id="btn-add-site">+ 添加站点</button>
+      </div>
+    </header>
+
+    <section id="view-overview" class="view">
+      <div class="kpis" id="kpis"></div>
+      <div class="split">
+        <div class="panel">
+          <div class="panel-head"><h2>今日计划</h2><span class="muted sm" id="plan-sub"></span></div>
+          <div id="plan-list" class="plan-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>近 14 日收益</h2></div>
+          <div id="chart" class="chart"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-sites" class="view hidden">
+      <div id="site-grid" class="site-grid"></div>
+      <div id="sites-empty" class="empty hidden">
+        还没有站点。点击右上角「添加站点」开始，建议先填 API Key 模式验证连通性。
+      </div>
+    </section>
+
+    <section id="view-logs" class="view hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>签到日志</h2>
+          <button class="btn ghost sm" id="btn-reload-logs">刷新</button>
+        </div>
+        <div class="table-wrap"><table class="tbl" id="log-table"></table></div>
+      </div>
+    </section>
+
+    <section id="view-settings" class="view hidden">
+      <div class="panel narrow">
+        <h2>通知 Webhook</h2>
+        <p class="muted sm">签到结果会推送到这里。支持企业微信 / 钉钉 / 飞书机器人、ntfy、或任意接收 JSON 的地址。</p>
+        <div class="field"><label>类型</label>
+          <select id="wh-type">
+            <option value="generic">通用 JSON</option>
+            <option value="wecom">企业微信</option>
+            <option value="dingtalk">钉钉</option>
+            <option value="feishu">飞书</option>
+            <option value="ntfy">ntfy</option>
+          </select>
+        </div>
+        <div class="field"><label>地址</label><input id="wh-url" placeholder="https://..."></div>
+        <div class="field inline"><label>每日 12:10 刷新余额</label>
+          <input type="checkbox" id="daily-refresh">
+        </div>
+        <div class="row gap">
+          <button class="btn primary" id="btn-save-settings">保存</button>
+          <button class="btn ghost" id="btn-test-webhook">发送测试</button>
+        </div>
+        <p class="hint" id="settings-hint"></p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><h2 id="modal-title">标题</h2><button class="icon-btn" id="modal-close">×</button></div>
+    <div id="modal-body" class="modal-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
