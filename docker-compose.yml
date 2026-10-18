@@ -1,0 +1,30 @@
+services:
+  ai-checkin-hub:
+    image: ghcr.io/wdw6733/ai-checkin-hub:latest
+    # 想在本机构建就把下面一行取消注释，然后 docker compose up -d --build
+    # build: .
+    container_name: ai-checkin-hub
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      # 数据库、密钥、浏览器会话全部落在这里，备份这一个目录即可
+      - ./data:/data
+    environment:
+      TZ: Asia/Shanghai
+      # 务必修改：控制台登录密码
+      WEB_PASSWORD: ${WEB_PASSWORD:-admin}
+      # 可选：固定凭据加密密钥（Fernet key）。留空则首次启动自动生成到 /data/secret.key
+      SECRET_KEY: ${SECRET_KEY:-}
+      MAX_CONCURRENCY: "4"
+      HEADLESS: "true"
+      HTTP_TIMEOUT: "25"
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8888/healthz',timeout=4)"]
+      interval: 30s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
