@@ -273,6 +273,15 @@ const act = {
     const a = s?.accounts?.find((x) => x.id === accountId);
     if (a) openEditAccountModal(siteId, a);
   },
+  async closeRemote() {
+    stopRemotePolling();
+    const aid = remoteAccountId;
+    remoteAccountId = null;
+    if (aid) {
+      await api(`/api/accounts/${aid}/remote-login/close`, { method: 'POST' }).catch(() => {});
+    }
+    closeModal();
+  },
 };
 
 async function withBusy(btn, label, fn) {
@@ -289,7 +298,10 @@ function openModal(title, bodyHtml) {
   $('#modal-body').innerHTML = bodyHtml;
   $('#modal').classList.remove('hidden');
 }
-function closeModal() { $('#modal').classList.add('hidden'); }
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  if (typeof stopRemotePolling === 'function') stopRemotePolling();
+}
 $('#modal-close').addEventListener('click', closeModal);
 $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 
@@ -442,7 +454,8 @@ function openEditAccountModal(siteId, account) {
     <div class="auth-box">
       <p class="muted sm">站点只开放 LinuxDO 授权、没有密码时用这里。不需要手动找 <code>_t</code>：导入整段 cookie JSON 即可，导入后会自动换一次站点会话并验证。</p>
       <div class="row gap">
-        <button class="btn ghost sm" id="ea-visible">浏览器授权登录（需桌面环境）</button>
+        <button class="btn primary sm" id="ea-remote">远程登录（网页内完成）</button>
+        <button class="btn ghost sm" id="ea-visible">浏览器授权登录（需桌面）</button>
         <button class="btn ghost sm" id="ea-headless">无头续期（用已导入的会话）</button>
       </div>
       <div class="field" style="margin-top:10px">
@@ -478,7 +491,7 @@ function openEditAccountModal(siteId, account) {
   const authHint = (msg) => { $('#ea-auth-hint').textContent = msg || ''; };
 
   async function runBrowserLogin(headless) {
-    authHint(headless ? '正在无头续期，请稍候…' : '已打开浏览器窗口，请在窗口里完成 LinuxDO 登录与授权…');
+    authHint(headless ? '正在无头续期，请稍候…' : '正在尝试打开浏览器窗口…');
     try {
       const r = await api(`/api/accounts/${account.id}/browser-login`, {
         method: 'POST',
@@ -490,6 +503,7 @@ function openEditAccountModal(siteId, account) {
     } catch (e) { authHint(e.message); toast(e.message); }
   }
 
+  $('#ea-remote').addEventListener('click', () => openRemoteLogin(account));
   $('#ea-visible').addEventListener('click', () => runBrowserLogin(false));
   $('#ea-headless').addEventListener('click', () => runBrowserLogin(true));
   $('#ea-import').addEventListener('click', async () => {
@@ -506,6 +520,113 @@ function openEditAccountModal(siteId, account) {
       if (r.verified) loadSites();
     } catch (e) { authHint(e.message); toast(e.message); }
   });
+}
+
+/* ---------------- 远程登录（网页内操作无头浏览器） ---------------- */
+let remoteTimer = null;
+let remoteFrame = null;
+let remoteBusy = false;
+let remoteAccountId = null;
+
+function stopRemotePolling() {
+  if (remoteTimer) { clearInterval(remoteTimer); remoteTimer = null; }
+}
+
+function renderRemoteFrame(f) {
+  remoteFrame = f;
+  const img = $('#rl-img');
+  if (!img || !f) return;
+  img.src = f.img;
+  const urlEl = $('#rl-url');
+  if (urlEl) urlEl.textContent = f.url || '';
+  const save = $('#rl-save');
+  if (save) save.disabled = !f.done;
+  if (f.done) $('#rl-tip').textContent = '已检测到登录成功，点「完成并保存」即可。';
+}
+
+async function openRemoteLogin(account) {
+  remoteAccountId = account.id;
+  remoteFrame = null;
+  openModal('远程登录 · ' + (account.label || account.username || '账号' + account.id), `
+    <p class="muted sm" id="rl-tip">正在启动浏览器并打开登录页…</p>
+    <div class="rl-stage"><img id="rl-img" alt="远程浏览器画面"></div>
+    <div class="row gap" style="margin:10px 0 8px">
+      <input id="rl-text" placeholder="要输入的文字（先在画面上点一下目标输入框）" style="flex:1">
+      <button class="btn ghost sm" id="rl-send">输入</button>
+      <button class="btn ghost sm" id="rl-enter">回车</button>
+    </div>
+    <div class="row gap">
+      <button class="btn ghost sm" id="rl-back">后退</button>
+      <button class="btn ghost sm" id="rl-reload">刷新画面</button>
+      <span class="muted sm" id="rl-url" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="rl-cancel">关闭</button>
+      <button class="btn primary" id="rl-save" disabled>完成并保存</button>
+    </div>
+  `);
+
+  const send = async (payload) => {
+    if (remoteBusy) return;
+    remoteBusy = true;
+    try {
+      const r = await api(`/api/accounts/${account.id}/remote-login/action`, {
+        method: 'POST', body: JSON.stringify(payload),
+      });
+      renderRemoteFrame(r.frame);
+    } catch (e) { $('#rl-tip').textContent = e.message; }
+    finally { remoteBusy = false; }
+  };
+
+  $('#rl-img').addEventListener('click', (e) => {
+    if (!remoteFrame) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.round((e.clientX - rect.left) * (remoteFrame.width / rect.width));
+    const y = Math.round((e.clientY - rect.top) * (remoteFrame.height / rect.height));
+    send({ kind: 'click', x, y });
+  });
+  $('#rl-send').addEventListener('click', () => {
+    const t = $('#rl-text').value;
+    if (t) { send({ kind: 'type', text: t }); $('#rl-text').value = ''; }
+  });
+  $('#rl-text').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('#rl-send').click(); }
+  });
+  $('#rl-enter').addEventListener('click', () => send({ kind: 'press', key: 'Enter' }));
+  $('#rl-back').addEventListener('click', () => send({ kind: 'press', key: 'Alt+ArrowLeft' }));
+  $('#rl-reload').addEventListener('click', async () => {
+    try {
+      const r = await api(`/api/accounts/${account.id}/remote-login/frame`);
+      renderRemoteFrame(r.frame);
+    } catch (e) { $('#rl-tip').textContent = e.message; }
+  });
+  $('#rl-cancel').addEventListener('click', () => act.closeRemote());
+  $('#rl-save').addEventListener('click', async () => {
+    try {
+      const r = await api(`/api/accounts/${account.id}/remote-login/finish`, { method: 'POST' });
+      toast(r.message || '已保存');
+      await act.closeRemote();
+      loadSites();
+    } catch (e) { $('#rl-tip').textContent = e.message; }
+  });
+
+  try {
+    const r = await api(`/api/accounts/${account.id}/remote-login/start`, { method: 'POST' });
+    renderRemoteFrame(r.frame);
+    $('#rl-tip').textContent = '在下方画面里完成 LinuxDO 登录：点画面即点击，文字用输入框发送，登录成功后点「完成并保存」。';
+  } catch (e) {
+    $('#rl-tip').textContent = e.message;
+    return;
+  }
+
+  stopRemotePolling();
+  remoteTimer = setInterval(async () => {
+    if (remoteBusy || !remoteFrame) return;
+    try {
+      const r = await api(`/api/accounts/${account.id}/remote-login/frame`);
+      renderRemoteFrame(r.frame);
+    } catch (e) { stopRemotePolling(); $('#rl-tip').textContent = e.message; }
+  }, 1600);
 }
 
 /* ---------------- 日志 ---------------- */

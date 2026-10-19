@@ -196,6 +196,10 @@ select option{background:#131a25}
 .auth-box textarea{resize:vertical;min-height:72px;font-family:var(--mono);font-size:11.5px;line-height:1.5}
 .auth-box .hint{margin:8px 0 0;min-height:16px}
 
+/* 远程登录舞台 */
+.rl-stage{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000;line-height:0;max-height:60vh;overflow-y:auto}
+.rl-stage img{width:100%;display:block;cursor:crosshair}
+
 /* 弹窗 */
 .modal{position:fixed;inset:0;background:rgba(4,7,12,.7);backdrop-filter:blur(6px);display:grid;place-items:center;z-index:50;padding:20px}
 .modal-card{

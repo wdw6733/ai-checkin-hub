@@ -106,16 +106,23 @@ session**，不是 linux.do 的某个值。
 
 项目按 checkin-panel 的思路处理：**一个账号一个持久化 Chromium profile**，授权一次后
 IdP 会话留在 profile 里，之后每天由无头浏览器复用该会话重新走一遍 OAuth，换取新的站点
-会话。两条入口都在站点卡片的「编辑」→ 账号行「编辑CK」里：
+会话。三条入口都在站点卡片的「编辑」→ 账号行「编辑CK」里：
 
 | 入口 | 前提 | 用途 |
 |---|---|---|
-| **浏览器授权登录** | 服务端有显示环境（本机 / 带桌面的机器） | 打开可见窗口，手动点一次「Continue with LinuxDO」完成授权 |
-| **导入 linux.do Cookie** | 无 | 用 cookie 扩展导出 linux.do 的 cookie **JSON**，粘贴导入；导入后会当场换一次站点会话并验证 |
+| **远程登录（网页内完成）** | 无 | **推荐**。服务端起无头浏览器，面板里实时显示画面，点画面即点击、输入框发文字，手机也能完成授权 |
+| **浏览器授权登录** | 服务端有显示环境（本机 / 带桌面的机器） | 直接弹真窗口，手动点一次「Continue with LinuxDO」 |
+| **导入 linux.do Cookie** | 无 | 用 cookie 扩展导出 linux.do 的 cookie **JSON**，粘贴导入；导入后当场换一次站点会话并验证 |
 
-服务器（Docker、无桌面）只能用第二条：在电脑浏览器登录 linux.do，用 Cookie-Editor 之类的
-扩展「Export」出 JSON，粘贴进来即可。**不要只复制 `_t` 的值**——导入整段 JSON 才能让
-profile 具备完整会话。
+Docker / 服务器没有显示环境，「浏览器授权登录」会立刻返回明确提示而不是干等；这时用
+**远程登录**或**导入 Cookie**。
+
+远程登录的操作方式：点「远程登录」→ 在画面里点 `Continue with LinuxDO` → 用输入框填
+linux.do 的账号密码（先在画面上点一下输入框）→ 完成授权 → 页面检测到已登录后点
+「完成并保存」。会话 15 分钟无操作自动回收。
+
+若用 cookie 导入：在电脑浏览器登录 linux.do，用 Cookie-Editor 之类的扩展「Export」出
+JSON 粘贴进来。**不要只复制 `_t` 的值**——导入整段 JSON 才能让 profile 具备完整会话。
 
 授权成功后账号的认证方式会变成「LinuxDO 授权（自动续期）」。站点会话过期时，调度器会
 自动用 profile 里的 linux.do 会话重新授权一次再签到，失败才记错误日志；只有 linux.do
@@ -143,6 +150,11 @@ profile 具备完整会话。
 | POST | `/api/accounts/{id}/refresh` | 刷新余额与模型数 |
 | POST | `/api/accounts/{id}/browser-login` | 走一遍 LinuxDO 授权，保存站点会话（`headless=false` 开可见窗口） |
 | POST | `/api/accounts/{id}/idp-cookies` | 导入 linux.do cookie JSON，并验证能否换到站点会话 |
+| POST | `/api/accounts/{id}/remote-login/start` | 开远程登录会话，返回首帧截图 |
+| GET | `/api/accounts/{id}/remote-login/frame` | 取当前画面（JPEG base64）+ URL + 是否已登录 |
+| POST | `/api/accounts/{id}/remote-login/action` | 转发点击 / 输入 / 回车 / 滚动 / 跳转 |
+| POST | `/api/accounts/{id}/remote-login/finish` | 登录完成后取出站点会话并保存 |
+| POST | `/api/accounts/{id}/remote-login/close` | 关闭远程登录会话 |
 | POST | `/api/checkin/all` | 全量签到（并发 3） |
 | GET | `/api/logs` | 签到日志 |
 | GET/PUT | `/api/settings` | Webhook 与每日刷新开关 |

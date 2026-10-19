@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import adapters, browser, config, crypto, db, notify, runner, scheduler, security
+from . import adapters, browser, config, crypto, db, notify, remote_login, runner, scheduler, security
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -110,6 +110,16 @@ class BrowserLoginIn(BaseModel):
 class IdpCookiesIn(BaseModel):
     cookies: str
     verify: bool = True
+
+
+class RemoteActionIn(BaseModel):
+    kind: Literal["click", "type", "press", "scroll", "goto"]
+    x: int | None = None
+    y: int | None = None
+    text: str | None = None
+    key: str | None = None
+    url: str | None = None
+    dy: int | None = None
 
 
 # ---------------- 会话 ----------------
@@ -373,6 +383,12 @@ async def browser_login(aid: int, body: BrowserLoginIn, _: None = Auth) -> dict:
     site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
     if not site:
         raise HTTPException(404, "站点不存在")
+    if not body.headless and not remote_login.display_available():
+        raise HTTPException(
+            400,
+            "当前服务端没有显示环境（Docker / 无桌面），无法弹出浏览器窗口。"
+            "请改用「远程登录（网页内完成）」，或导入 linux.do cookie。",
+        )
     try:
         cookie = await browser.browser_login_linuxdo(
             site, acc, headless=body.headless, timeout_s=body.timeout)
@@ -413,6 +429,67 @@ async def idp_cookies(aid: int, body: IdpCookiesIn, _: None = Auth) -> dict:
     else:
         result["message"] = f"已导入 {count} 条 cookie，未验证"
     return result
+
+
+# ---------------- 远程登录（网页内操作无头浏览器） ----------------
+
+def _account_and_site(aid: int) -> tuple[dict, dict]:
+    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
+    if not site:
+        raise HTTPException(404, "站点不存在")
+    return acc, site
+
+
+@app.post("/api/accounts/{aid}/remote-login/start")
+async def remote_login_start(aid: int, _: None = Auth) -> dict:
+    """开一个远程登录会话：无头浏览器打开站点登录页，返回首帧截图。
+
+    用于服务器 / Docker 这类没有显示环境、又必须人工完成 OAuth 的场景。
+    """
+    acc, site = _account_and_site(aid)
+    try:
+        frame = await remote_login.start(site, acc)
+    except adapters.SiteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "frame": frame, "display_available": remote_login.display_available()}
+
+
+@app.get("/api/accounts/{aid}/remote-login/frame")
+async def remote_login_frame(aid: int, _: None = Auth) -> dict:
+    sess = remote_login.get(aid)
+    if not sess:
+        raise HTTPException(404, "远程登录会话已结束，请重新开始")
+    return {"ok": True, "frame": await sess.snapshot()}
+
+
+@app.post("/api/accounts/{aid}/remote-login/action")
+async def remote_login_action(aid: int, body: RemoteActionIn, _: None = Auth) -> dict:
+    try:
+        frame = await remote_login.act(
+            aid, body.kind, x=body.x, y=body.y, text=body.text,
+            key=body.key, url=body.url, dy=body.dy)
+    except adapters.SiteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "frame": frame}
+
+
+@app.post("/api/accounts/{aid}/remote-login/finish")
+async def remote_login_finish(aid: int, _: None = Auth) -> dict:
+    try:
+        cookie = await remote_login.finish(aid)
+    except adapters.SiteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _save_site_session(aid, cookie)
+    return {"ok": True, "message": "登录完成，站点会话已保存"}
+
+
+@app.post("/api/accounts/{aid}/remote-login/close")
+async def remote_login_close(aid: int, _: None = Auth) -> dict:
+    await remote_login.close(aid)
+    return {"ok": True}
 
 
 # ---------------- 日志 / 设置 ----------------
