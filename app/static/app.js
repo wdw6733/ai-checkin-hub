@@ -468,24 +468,52 @@ function openEditAccountModal(siteId, account) {
 
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" id="ea-verify">保存并验证</button>
       <button class="btn primary" id="ea-submit">保存</button>
     </div>
   `);
+  async function saveAccount() {
+    const body = {
+      auth_mode: $('#ea-auth').value,
+      label: $('#ea-label').value.trim(),
+      username: $('#ea-user').value.trim(),
+    };
+    const secret = $('#ea-secret').value.trim();
+    if (secret) body.secret = secret;
+    await api(`/api/accounts/${account.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+    loadSites();
+  }
+
   $('#ea-submit').addEventListener('click', async () => {
     try {
-      const body = {
-        auth_mode: $('#ea-auth').value,
-        label: $('#ea-label').value.trim(),
-        username: $('#ea-user').value.trim(),
-      };
-      const secret = $('#ea-secret').value.trim();
-      if (secret) body.secret = secret;
-      await api(`/api/accounts/${account.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      });
-      closeModal(); toast('已保存'); loadSites();
+      await saveAccount();
+      closeModal(); toast('已保存');
     } catch (e) { toast(e.message); }
+  });
+
+  $('#ea-verify').addEventListener('click', async () => {
+    const btn = $('#ea-verify');
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = '验证中…';
+    try {
+      await saveAccount();
+      const r = await api(`/api/accounts/${account.id}/refresh`, { method: 'POST' });
+      if (r.ok) {
+        const q = r.quota == null ? '-' : '$' + Number(r.quota).toFixed(3);
+        authHint(`凭据有效：余额 ${q}，可用模型 ${r.models ?? '-'} 个`);
+        toast('凭据有效');
+      } else {
+        authHint(`凭据无效：${r.message || '未知错误'}`);
+        toast('凭据无效');
+      }
+    } catch (e) {
+      authHint(e.message); toast(e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
   });
 
   const authHint = (msg) => { $('#ea-auth-hint').textContent = msg || ''; };

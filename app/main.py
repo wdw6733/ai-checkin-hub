@@ -29,6 +29,21 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="AI Checkin Hub", version="1.0.0", lifespan=lifespan,
               docs_url=None, redoc_url=None)
 
+
+@app.middleware("http")
+async def no_store_static(request: Request, call_next):
+    """静态资源禁用缓存。
+
+    面板是单文件前端，升级镜像后浏览器仍可能拿旧的 app.js，导致新按钮/新面板
+    根本不出现——看起来像「功能没生效」。这里对 / 与 /static/* 一律 no-store。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 Auth = Depends(security.require)
 
 
@@ -148,6 +163,54 @@ def login(body: LoginIn, response: Response) -> dict:
 def logout(response: Response) -> dict:
     response.delete_cookie(security.COOKIE_NAME, path="/")
     return {"ok": True}
+
+
+@app.get("/api/diagnose")
+async def diagnose(launch: int = 0, _: None = Auth) -> dict:
+    """环境自检：浏览器通道 / 远程登录起不来时，先看这里。
+
+    `?launch=1` 会真的起一次无头 Chromium，用来确认容器里的浏览器可用。
+    """
+    import os
+    import sys
+
+    info: dict = {
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+        "display_available": remote_login.display_available(),
+        "headless_env": config.HEADLESS,
+        "data_dir": str(config.DATA_DIR),
+        "data_writable": os.access(config.DATA_DIR, os.W_OK),
+        "browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
+    }
+    try:
+        import playwright  # noqa: F401
+        info["playwright"] = "installed"
+    except Exception as exc:
+        info["playwright"] = f"missing: {type(exc).__name__}"
+
+    bp = info["browsers_path"]
+    if bp and os.path.isdir(bp):
+        try:
+            info["browsers"] = sorted(os.listdir(bp))[:10]
+        except Exception:
+            info["browsers"] = "unreadable"
+    else:
+        info["browsers"] = "n/a"
+
+    if launch:
+        try:
+            from playwright.async_api import async_playwright
+            pw = await async_playwright().start()
+            try:
+                br = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+                await br.close()
+                info["launch"] = "ok"
+            finally:
+                await pw.stop()
+        except Exception as exc:
+            info["launch"] = f"fail: {type(exc).__name__}: {str(exc)[:200]}"
+    return info
 
 
 # ---------------- 概览 ----------------
