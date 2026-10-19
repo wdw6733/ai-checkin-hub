@@ -43,7 +43,7 @@ def norm_base(url: str) -> str:
 
 # ---------------- 模型 ----------------
 
-AuthMode = Literal["token", "password", "cookie", "linuxdo"]
+AuthMode = Literal["token", "password", "cookie", "linuxdo", "linuxdo_browser"]
 ScheduleMode = Literal["fixed", "random"]
 
 
@@ -100,6 +100,16 @@ class SettingsIn(BaseModel):
     webhook_url: str | None = None
     webhook_type: str | None = None
     daily_refresh: str | None = None
+
+
+class BrowserLoginIn(BaseModel):
+    headless: bool = True
+    timeout: int = Field(default=180, ge=30, le=600)
+
+
+class IdpCookiesIn(BaseModel):
+    cookies: str
+    verify: bool = True
 
 
 # ---------------- 会话 ----------------
@@ -339,6 +349,70 @@ async def oauth_account(aid: int, _: None = Auth) -> dict:
     db.run("UPDATE accounts SET secret_enc=?, auth_mode='cookie', last_error='' WHERE id=?",
            (crypto.encrypt(cookie), aid))
     return {"ok": True, "message": "OAuth 完成，已切换为 Cookie 模式"}
+
+
+def _save_site_session(aid: int, cookie: str) -> None:
+    """把一次授权换来的站点会话写回账号，切成可自动续期的授权模式。"""
+    db.run(
+        "UPDATE accounts SET secret_enc=?, auth_mode='linuxdo_browser', last_error='',"
+        " last_result='' WHERE id=?",
+        (crypto.encrypt(cookie), aid),
+    )
+
+
+@app.post("/api/accounts/{aid}/browser-login")
+async def browser_login(aid: int, body: BrowserLoginIn, _: None = Auth) -> dict:
+    """走一遍 linux.do 授权并保存站点会话。
+
+    headless=false 需要服务端有显示环境（本机 / 带桌面的机器），窗口里由用户点一次
+    「Continue with LinuxDO」；headless=true 则复用 profile 里已导入的 linux.do 会话。
+    """
+    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
+    if not site:
+        raise HTTPException(404, "站点不存在")
+    try:
+        cookie = await browser.browser_login_linuxdo(
+            site, acc, headless=body.headless, timeout_s=body.timeout)
+    except adapters.SiteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _save_site_session(aid, cookie)
+    return {"ok": True, "message": "授权成功，站点会话已保存"}
+
+
+@app.post("/api/accounts/{aid}/idp-cookies")
+async def idp_cookies(aid: int, body: IdpCookiesIn, _: None = Auth) -> dict:
+    """导入浏览器导出的 linux.do cookie，再（可选）当场验证能否换到站点会话。
+
+    这是服务器部署的可行路径：用户不必再去找 `_t`，把 cookie 扩展导出的整段 JSON
+    粘进来即可。cookie 只写入该账号的浏览器 profile，不落库。
+    """
+    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
+    if not acc:
+        raise HTTPException(404, "账号不存在")
+    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
+    if not site:
+        raise HTTPException(404, "站点不存在")
+    try:
+        count = await browser.inject_idp_cookies(site, acc, body.cookies)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    result: dict = {"ok": True, "injected": count, "verified": None}
+    if body.verify:
+        try:
+            cookie = await browser.browser_login_linuxdo(site, acc, headless=True, timeout_s=180)
+        except adapters.SiteError as exc:
+            result.update(verified=False,
+                          message=f"Cookie 已导入，但换站点会话失败：{exc}")
+            return result
+        _save_site_session(aid, cookie)
+        result.update(verified=True, message="已导入并验证成功，站点会话已保存")
+    else:
+        result["message"] = f"已导入 {count} 条 cookie，未验证"
+    return result
 
 
 # ---------------- 日志 / 设置 ----------------

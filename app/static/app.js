@@ -297,7 +297,8 @@ const AUTH_OPTIONS = [
   ['token', 'API Key / 访问令牌（推荐）'],
   ['password', '账号密码'],
   ['cookie', '浏览器 Cookie'],
-  ['linuxdo', 'linux.do OAuth'],
+  ['linuxdo_browser', 'LinuxDO 授权（自动续期，推荐）'],
+  ['linuxdo', 'linux.do OAuth（手动 _t）'],
 ];
 
 function openSiteModal(site) {
@@ -351,7 +352,7 @@ function openSiteModal(site) {
     </div>
     <div class="field"><label id="f-secret-label">密钥</label>
       <input id="f-secret" type="password" placeholder="API Key / 密码 / Cookie">
-      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；linux.do 模式填 _t 的值。</div>
+      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；LinuxDO 授权模式无需填密钥，用下方「导入 cookie / 浏览器授权登录」换取站点会话。</div>
     </div>`}
 
     <div class="modal-foot">
@@ -434,8 +435,24 @@ function openEditAccountModal(siteId, account) {
     </div>
     <div class="field"><label>用户名</label><input id="ea-user" value="${esc(account.username || '')}" placeholder="密码模式必填"></div>
     <div class="field"><label>密钥（留空则不修改）</label><input id="ea-secret" type="password" placeholder="输入新密钥，留空保持不变">
-      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；linux.do 模式填 _t 的值。</div>
+      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；LinuxDO 授权模式无需填密钥，用下方「导入 cookie / 浏览器授权登录」换取站点会话。</div>
     </div>
+
+    <div class="section-title">linux.do 授权登录</div>
+    <div class="auth-box">
+      <p class="muted sm">站点只开放 LinuxDO 授权、没有密码时用这里。不需要手动找 <code>_t</code>：导入整段 cookie JSON 即可，导入后会自动换一次站点会话并验证。</p>
+      <div class="row gap">
+        <button class="btn ghost sm" id="ea-visible">浏览器授权登录（需桌面环境）</button>
+        <button class="btn ghost sm" id="ea-headless">无头续期（用已导入的会话）</button>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>导入 linux.do Cookie</label>
+        <textarea id="ea-cookies" rows="4" placeholder='粘贴 cookie 扩展导出的 JSON，例如 [{"name":"_t","value":"...","domain":".linux.do"}]；也接受 name=value; name2=value2'></textarea>
+      </div>
+      <button class="btn sm" id="ea-import">导入并验证</button>
+      <p class="hint" id="ea-auth-hint"></p>
+    </div>
+
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">取消</button>
       <button class="btn primary" id="ea-submit">保存</button>
@@ -456,6 +473,38 @@ function openEditAccountModal(siteId, account) {
       });
       closeModal(); toast('已保存'); loadSites();
     } catch (e) { toast(e.message); }
+  });
+
+  const authHint = (msg) => { $('#ea-auth-hint').textContent = msg || ''; };
+
+  async function runBrowserLogin(headless) {
+    authHint(headless ? '正在无头续期，请稍候…' : '已打开浏览器窗口，请在窗口里完成 LinuxDO 登录与授权…');
+    try {
+      const r = await api(`/api/accounts/${account.id}/browser-login`, {
+        method: 'POST',
+        body: JSON.stringify({ headless, timeout: headless ? 180 : 300 }),
+      });
+      authHint(r.message || '授权成功');
+      toast(r.message || '授权成功');
+      loadSites();
+    } catch (e) { authHint(e.message); toast(e.message); }
+  }
+
+  $('#ea-visible').addEventListener('click', () => runBrowserLogin(false));
+  $('#ea-headless').addEventListener('click', () => runBrowserLogin(true));
+  $('#ea-import').addEventListener('click', async () => {
+    const raw = $('#ea-cookies').value.trim();
+    if (!raw) return authHint('请先粘贴 cookie');
+    authHint('正在导入并验证…');
+    try {
+      const r = await api(`/api/accounts/${account.id}/idp-cookies`, {
+        method: 'POST',
+        body: JSON.stringify({ cookies: raw, verify: true }),
+      });
+      authHint(r.message || '已导入');
+      toast(r.message || '已导入');
+      if (r.verified) loadSites();
+    } catch (e) { authHint(e.message); toast(e.message); }
   });
 }
 

@@ -60,27 +60,48 @@ async def run_account_checkin(account_id: int, trigger: str = "manual") -> dict:
         return {"ok": False, "message": "站点不存在"}
 
     tz = site_tz(site)
-    secret = crypto.decrypt(account["secret_enc"])
     mode = account.get("auth_mode") or "token"
+
+    async def attempt(acc: dict) -> tuple[adapters.CheckinOutcome, str]:
+        """跑一次签到，返回 (结果, 刷新后的 cookie)。"""
+        secret = crypto.decrypt(acc["secret_enc"])
+        if site.get("browser_mode") or mode == "linuxdo":
+            payload = dict(acc)
+            payload["_secret"] = secret
+            out = await browser.browser_checkin(site, payload)
+            return out, payload.get("_refreshed_cookie", "")
+        async with adapters.SiteSession(site, acc) as session:
+            return await session.checkin(), ""
 
     outcome: adapters.CheckinOutcome | None = None
     refreshed = ""
 
     try:
-        if site.get("browser_mode") or mode == "linuxdo":
-            payload = dict(account)
-            payload["_secret"] = secret
-            outcome = await browser.browser_checkin(site, payload)
-            refreshed = payload.get("_refreshed_cookie", "")
-        else:
-            async with adapters.SiteSession(site, account) as session:
-                outcome = await session.checkin()
+        outcome, refreshed = await attempt(account)
     except adapters.AuthError as exc:
-        msg = f"认证失败：{exc}"
-        _log(site, account, False, None, msg, {"trigger": trigger})
-        _stamp(account["id"], False, msg, None, tz)
-        await notify.push(f"[签到失败] {site['name']} · {account['label'] or account['username']}\n{msg}")
-        return {"ok": False, "message": msg}
+        # linux.do 授权账号：站点会话过期是常态，用 profile 里的 IdP 会话自动续一次，
+        # 成功就接着签，失败才如实报错。这是「每天自动签到」能长期跑下去的关键。
+        if mode == "linuxdo_browser":
+            try:
+                cookie = await browser.browser_login_linuxdo(
+                    site, account, headless=True, timeout_s=180)
+                db.run("UPDATE accounts SET secret_enc=?, last_error='' WHERE id=?",
+                       (crypto.encrypt(cookie), account["id"]))
+                account = db.one("SELECT * FROM accounts WHERE id=?", (account["id"],)) or account
+                outcome, refreshed = await attempt(account)
+            except adapters.SiteError as renew_exc:
+                msg = f"认证失败：{exc}；自动重新授权失败：{renew_exc}"
+                _log(site, account, False, None, msg, {"trigger": trigger})
+                _stamp(account["id"], False, msg, None, tz)
+                await notify.push(
+                    f"[签到失败] {site['name']} · {account['label'] or account['username']}\n{msg}")
+                return {"ok": False, "message": msg}
+        else:
+            msg = f"认证失败：{exc}"
+            _log(site, account, False, None, msg, {"trigger": trigger})
+            _stamp(account["id"], False, msg, None, tz)
+            await notify.push(f"[签到失败] {site['name']} · {account['label'] or account['username']}\n{msg}")
+            return {"ok": False, "message": msg}
     except adapters.SiteError as exc:
         msg = f"签到失败：{exc}"
         _log(site, account, False, None, msg, {"trigger": trigger})
@@ -97,8 +118,12 @@ async def run_account_checkin(account_id: int, trigger: str = "manual") -> dict:
     _stamp(account["id"], True, outcome.message, outcome, tz)
 
     if refreshed:
-        db.run("UPDATE accounts SET secret_enc=?, auth_mode='cookie' WHERE id=?",
-               (crypto.encrypt(refreshed), account["id"]))
+        # 浏览器通道刷新出的 cookie 回写；LinuxDO 授权账号保留可自动续期的模式，
+        # 不要被降级成普通 cookie，否则会话过期后就再也不会自动重新授权了。
+        db.run("UPDATE accounts SET secret_enc=?, auth_mode=? WHERE id=?",
+               (crypto.encrypt(refreshed),
+                "linuxdo_browser" if mode == "linuxdo_browser" else "cookie",
+                account["id"]))
 
     gained_txt = f"+{outcome.gained:g}" if outcome.gained not in (None, 0) else "无新增"
     await notify.push(
