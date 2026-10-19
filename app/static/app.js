@@ -550,7 +550,7 @@ function openEditAccountModal(siteId, account) {
         const detail = (r.attempts || [])
           .map((a) => `${a.strategy}: ${a.status || '-'} ${a.detail || ''}`.trim())
           .join(' ｜ ');
-        authHint(`四种方式都没通过 —— ${detail}`);
+        authHint(`探测未通过 —— ${detail}\n\n若该站点只支持 LinuxDO 登录，localStorage 里的 token 通常是「API Key」（用于聊天接口），对用户中心接口无效。请改用「远程登录」在网页内完成 OAuth，自动提取站点 session Cookie。`);
         toast('凭据无效');
       }
     } catch (e) { authHint(e.message); toast(e.message); }
