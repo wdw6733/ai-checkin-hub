@@ -451,7 +451,8 @@ function openEditAccountModal(siteId, account) {
     </div>
     <div class="field"><label>密钥 / Cookie / 令牌（留空则不修改）</label>
       <input id="ea-secret" type="password" placeholder="sk-… / session=xxx; … / access token">
-      <div class="form-hint">不确定该填什么、该选哪种认证方式？直接粘进来点「探测凭据」，会自动判断并按可用的方式保存。</div>
+      <div class="form-hint">不确定该填什么、该选哪种认证方式？直接粘进来点「探测凭据」，会自动判断并按可用的方式保存。<br>
+        若站点用 LinuxDO 登录，最省事的是在站点 F12 控制台执行 <code>copy(localStorage.getItem("user"))</code>，把整段 JSON 粘进来——token 与用户 ID 会自动解析。</div>
       <button class="btn ghost sm" id="ea-probe" type="button">探测凭据</button>
     </div>
 

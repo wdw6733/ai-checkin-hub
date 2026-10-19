@@ -362,10 +362,34 @@ def _credential_strategies(secret: str, uid: str) -> list[tuple[str, str, dict, 
     return out
 
 
+def _unpack_user_json(raw: str, uid: str) -> tuple[str, str]:
+    """支持直接粘贴站点 `localStorage.user` 的整段 JSON。
+
+    该站前端把登录结果整个塞进 localStorage：请求头 `Authorization: Bearer <token>`，
+    并且带 `New-Api-User: <id>`（前端 `x_()` 读的就是 user.id）。所以只要用户把那段
+    JSON 原样粘进来，token 与 id 都能自动拆出来，不必手抄两个字段。
+    """
+    text = (raw or "").strip()
+    if not text.startswith("{"):
+        return text, uid
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return text, uid
+    if not isinstance(obj, dict):
+        return text, uid
+    token = obj.get("token") or obj.get("access_token") or ""
+    new_uid = obj.get("id") or obj.get("user_id") or ""
+    if token:
+        return str(token), str(new_uid or uid or "")
+    return text, uid
+
+
 async def probe_auth(site: dict, secret: str, uid: str = "") -> dict:
     """试出这段凭据该以哪种方式使用，成功则返回可用策略与用户信息。"""
     base = (site.get("base_url") or "").rstrip("/")
     path = site.get("self_path") or "/api/user/self"
+    secret, uid = _unpack_user_json(secret, uid)
     if not secret.strip():
         raise SiteError("没有提供凭据")
 
