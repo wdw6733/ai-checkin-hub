@@ -445,9 +445,14 @@ function openEditAccountModal(siteId, account) {
         ${AUTH_OPTIONS.map(([v, t]) => `<option value="${v}" ${account.auth_mode === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
       <div class="field"><label>标签</label><input id="ea-label" value="${esc(account.label || '')}" placeholder="例如 主号"></div>
     </div>
-    <div class="field"><label>用户名</label><input id="ea-user" value="${esc(account.username || '')}" placeholder="密码模式必填"></div>
-    <div class="field"><label>密钥（留空则不修改）</label><input id="ea-secret" type="password" placeholder="输入新密钥，留空保持不变">
-      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；LinuxDO 授权模式无需填密钥，用下方「导入 cookie / 浏览器授权登录」换取站点会话。</div>
+    <div class="grid2">
+      <div class="field"><label>用户名</label><input id="ea-user" value="${esc(account.username || '')}" placeholder="密码模式必填"></div>
+      <div class="field"><label>用户 ID（uid）</label><input id="ea-uid" value="${esc(account.uid || '')}" placeholder="New API 系常需要，可留空由探测补全"></div>
+    </div>
+    <div class="field"><label>密钥 / Cookie / 令牌（留空则不修改）</label>
+      <input id="ea-secret" type="password" placeholder="sk-… / session=xxx; … / access token">
+      <div class="form-hint">不确定该填什么、该选哪种认证方式？直接粘进来点「探测凭据」，会自动判断并按可用的方式保存。</div>
+      <button class="btn ghost sm" id="ea-probe" type="button">探测凭据</button>
     </div>
 
     <div class="section-title">linux.do 授权登录</div>
@@ -477,6 +482,7 @@ function openEditAccountModal(siteId, account) {
       auth_mode: $('#ea-auth').value,
       label: $('#ea-label').value.trim(),
       username: $('#ea-user').value.trim(),
+      uid: $('#ea-uid').value.trim(),
     };
     const secret = $('#ea-secret').value.trim();
     if (secret) body.secret = secret;
@@ -514,6 +520,40 @@ function openEditAccountModal(siteId, account) {
     } finally {
       btn.disabled = false; btn.textContent = old;
     }
+  });
+
+  $('#ea-probe').addEventListener('click', async () => {
+    const raw = $('#ea-secret').value.trim();
+    if (!raw) return authHint('请先在「密钥」里粘贴 cookie 或令牌');
+    const btn = $('#ea-probe');
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = '探测中…';
+    authHint('正在依次尝试 token / cookie / 带 uid 的组合…');
+    try {
+      const r = await api(`/api/accounts/${account.id}/probe-credential`, {
+        method: 'POST',
+        body: JSON.stringify({ secret: raw, uid: $('#ea-uid').value.trim(), save: true }),
+      });
+      if (r.ok) {
+        $('#ea-auth').value = r.mode;
+        if (r.uid) $('#ea-uid').value = r.uid;
+        let extra = '';
+        try {
+          const v = await api(`/api/accounts/${account.id}/refresh`, { method: 'POST' });
+          if (v.ok) extra = `，余额 ${v.quota == null ? '-' : '$' + Number(v.quota).toFixed(3)}`;
+        } catch (e) { /* 余额刷新失败不影响结论 */ }
+        authHint(`可用：${r.strategy} 方式已保存（用户 ${r.username || r.uid || '-'}${extra}）`);
+        toast('凭据可用，已保存');
+        loadSites();
+      } else {
+        const detail = (r.attempts || [])
+          .map((a) => `${a.strategy}: ${a.status || '-'} ${a.detail || ''}`.trim())
+          .join(' ｜ ');
+        authHint(`四种方式都没通过 —— ${detail}`);
+        toast('凭据无效');
+      }
+    } catch (e) { authHint(e.message); toast(e.message); }
+    finally { btn.disabled = false; btn.textContent = old; }
   });
 
   const authHint = (msg) => { $('#ea-auth-hint').textContent = msg || ''; };

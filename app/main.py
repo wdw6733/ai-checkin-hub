@@ -137,6 +137,12 @@ class RemoteActionIn(BaseModel):
     dy: int | None = None
 
 
+class CredentialIn(BaseModel):
+    secret: str
+    uid: str = ""
+    save: bool = True
+
+
 # ---------------- 会话 ----------------
 
 @app.get("/healthz")
@@ -504,6 +510,30 @@ def _account_and_site(aid: int) -> tuple[dict, dict]:
     if not site:
         raise HTTPException(404, "站点不存在")
     return acc, site
+
+
+@app.post("/api/accounts/{aid}/probe-credential")
+async def probe_credential(aid: int, body: CredentialIn, _: None = Auth) -> dict:
+    """探测一段凭据该怎么用：Cookie 还是 access token，需不需要 New-Api-User。
+
+    命中后按命中的方式保存（含自动取到的 uid），失败则把每种尝试的状态码与站点
+    原始提示一并返回，省掉「401 但不知道为什么」的来回试错。
+    """
+    _acc, site = _account_and_site(aid)
+    try:
+        result = await adapters.probe_auth(site, body.secret, body.uid)
+    except adapters.SiteError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if result.get("ok") and body.save:
+        db.run(
+            "UPDATE accounts SET secret_enc=?, auth_mode=?, uid=?, last_error='' WHERE id=?",
+            (crypto.encrypt(body.secret.strip()), result["mode"], result["uid"], aid),
+        )
+        result["saved"] = True
+    else:
+        result["saved"] = False
+    return result
 
 
 @app.post("/api/accounts/{aid}/remote-login/start")

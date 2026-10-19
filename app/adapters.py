@@ -252,7 +252,13 @@ class SiteSession:
 
     async def checkin(self) -> CheckinOutcome:
         assert self.client
-        before = await self.get_quota()
+        before = None
+        try:
+            before = await self.get_quota()
+        except SiteError:
+            # 读余额失败不该阻断签到：个别站 /api/user/self 受限但 checkin 本身可用，
+            # 让它继续打到签到端点，由端点自己给出更准确的结果。
+            before = None
 
         paths = [self.site.get("checkin_path") or "/api/user/checkin"]
         for fallback in ("/api/user/checkin", "/api/user/sign_in"):
@@ -322,8 +328,84 @@ class SiteSession:
         raise SiteError(last_error or "所有候选签到端点均失败")
 
 
-# ---------- 无凭据探测 ----------
+# ---------- 凭据探测 ----------
 
+def _credential_strategies(secret: str, uid: str) -> list[tuple[str, str, dict, dict]]:
+    """枚举「这段字符串可能是什么凭据」的几种解释。
+
+    One API / New API / Veloera 系对 `/api/user/*` 接受两种身份：会话 Cookie 与
+    access token（放 Authorization）。用户手里拿到的往往只是其中一种，而把它填进
+    错误的认证方式就会得到「access token 无效」或「not logged in」。与其让用户猜，
+    不如四种组合都试一遍。
+    """
+    secret = (secret or "").strip()
+    if secret.lower().startswith("cookie:"):
+        secret = secret[7:].strip()
+    looks_cookie = "=" in secret
+    uid = (uid or "").strip()
+
+    out: list[tuple[str, str, dict, dict]] = []
+    out.append(("token", "token", {"Authorization": f"Bearer {secret}"}, {}))
+    out.append(("raw-auth", "token", {"Authorization": secret}, {}))
+    if looks_cookie:
+        cookies = parse_cookie(secret)
+        if cookies:
+            out.append(("cookie", "cookie", {}, cookies))
+            if uid:
+                out.append(("cookie+uid", "cookie", {"New-Api-User": uid}, cookies))
+    else:
+        # 只复制了 cookie 的「值」没带名字，最常见的就是 session
+        out.append(("cookie-session", "cookie", {}, {"session": secret}))
+    if uid:
+        out.append(("token+uid", "token",
+                    {"Authorization": f"Bearer {secret}", "New-Api-User": uid}, {}))
+    return out
+
+
+async def probe_auth(site: dict, secret: str, uid: str = "") -> dict:
+    """试出这段凭据该以哪种方式使用，成功则返回可用策略与用户信息。"""
+    base = (site.get("base_url") or "").rstrip("/")
+    path = site.get("self_path") or "/api/user/self"
+    if not secret.strip():
+        raise SiteError("没有提供凭据")
+
+    attempts: list[dict] = []
+    for name, mode, headers, cookies in _credential_strategies(secret, uid):
+        h = {"User-Agent": config.USER_AGENT, "Accept": "application/json, text/plain, */*",
+             **headers}
+        try:
+            async with httpx.AsyncClient(
+                base_url=base, headers=h, cookies=cookies,
+                timeout=httpx.Timeout(config.HTTP_TIMEOUT, connect=12.0),
+                follow_redirects=True, verify=config.VERIFY_SSL,
+            ) as cli:
+                resp = await cli.get(path)
+        except httpx.HTTPError as exc:
+            attempts.append({"strategy": name, "status": 0,
+                             "detail": f"{type(exc).__name__}"})
+            continue
+
+        body = _json(resp)
+        snippet = str(body.get("message") or body.get("msg") or "")[:160]
+        attempts.append({"strategy": name, "status": resp.status_code, "detail": snippet})
+
+        if resp.status_code == 200 and body.get("success"):
+            payload = body.get("data") if isinstance(body.get("data"), dict) else {}
+            new_uid = payload.get("id") or payload.get("user_id") or ""
+            return {
+                "ok": True,
+                "strategy": name,
+                "mode": mode,
+                "uid": str(new_uid or uid or ""),
+                "username": payload.get("username") or payload.get("display_name") or "",
+                "quota": payload.get("quota"),
+                "attempts": attempts,
+            }
+
+    return {"ok": False, "strategy": None, "mode": None, "attempts": attempts}
+
+
+# ---------- 无凭据探测 ----------
 FRAMEWORK_RULES = {
     "newapi": ("HeaderNavModules", "SidebarModulesAdmin", "quota_per_unit", "chat_link"),
     "oneapi": ("One API", "one-api", "OneApi"),
