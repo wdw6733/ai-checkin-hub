@@ -268,6 +268,11 @@ const act = {
     loadSites();
   },
   addAccount(siteId) { openAccountModal(siteId); },
+  editAccount(siteId, accountId) {
+    const s = state.sites.find((x) => x.id === siteId);
+    const a = s?.accounts?.find((x) => x.id === accountId);
+    if (a) openEditAccountModal(siteId, a);
+  },
 };
 
 async function withBusy(btn, label, fn) {
@@ -326,7 +331,19 @@ function openSiteModal(site) {
       <input type="checkbox" id="f-browser" ${site?.browser_mode ? 'checked' : ''}></div>
     <div class="field"><label>备注</label><input id="f-note" value="${esc(site?.note || '')}"></div>
 
-    ${isEdit ? '' : `
+    ${isEdit ? `
+    <div class="section-title">已有账号 (${(site.accounts || []).length})</div>
+    <div class="account-list">
+      ${(site.accounts || []).map((a) => `
+        <div class="account-row">
+          <span class="account-label">${esc(a.label || a.username || '未命名')}</span>
+          <span class="account-mode tag">${esc(a.auth_mode)}</span>
+          <span class="account-uid muted">${esc(a.uid || '-')}</span>
+          <button class="btn ghost sm" onclick="act.editAccount(${site.id}, ${a.id})">编辑CK</button>
+        </div>`).join('') || '<p class="muted">暂无账号</p>'}
+    </div>
+    <button class="btn sm" onclick="act.addAccount(${site.id})" style="margin-bottom:12px">+ 添加账号</button>
+    ` : `
     <div class="section-title">首个账号</div>
     <div class="grid2">
       <div class="field"><label>认证方式</label><select id="f-auth">${authOpts}</select></div>
@@ -404,6 +421,40 @@ function openAccountModal(siteId) {
         }),
       });
       closeModal(); toast('已添加'); loadSites();
+    } catch (e) { toast(e.message); }
+  });
+}
+
+function openEditAccountModal(siteId, account) {
+  openModal('编辑账号 CK 信息', `
+    <div class="grid2">
+      <div class="field"><label>认证方式</label><select id="ea-auth">
+        ${AUTH_OPTIONS.map(([v, t]) => `<option value="${v}" ${account.auth_mode === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+      <div class="field"><label>标签</label><input id="ea-label" value="${esc(account.label || '')}" placeholder="例如 主号"></div>
+    </div>
+    <div class="field"><label>用户名</label><input id="ea-user" value="${esc(account.username || '')}" placeholder="密码模式必填"></div>
+    <div class="field"><label>密钥（留空则不修改）</label><input id="ea-secret" type="password" placeholder="输入新密钥，留空保持不变">
+      <div class="form-hint">API Key 模式填 sk-…；Cookie 模式填 name=value; name2=value2；linux.do 模式填 _t 的值。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="ea-submit">保存</button>
+    </div>
+  `);
+  $('#ea-submit').addEventListener('click', async () => {
+    try {
+      const body = {
+        auth_mode: $('#ea-auth').value,
+        label: $('#ea-label').value.trim(),
+        username: $('#ea-user').value.trim(),
+      };
+      const secret = $('#ea-secret').value.trim();
+      if (secret) body.secret = secret;
+      await api(`/api/accounts/${account.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      closeModal(); toast('已保存'); loadSites();
     } catch (e) { toast(e.message); }
   });
 }
