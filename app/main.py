@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -13,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import adapters, browser, config, crypto, db, notify, remote_login, runner, scheduler, security
+from . import adapters, config, crypto, db, notify, runner, scheduler, security
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -117,32 +116,6 @@ class SettingsIn(BaseModel):
     daily_refresh: str | None = None
 
 
-class BrowserLoginIn(BaseModel):
-    headless: bool = True
-    timeout: int = Field(default=180, ge=30, le=600)
-
-
-class IdpCookiesIn(BaseModel):
-    cookies: str
-    verify: bool = True
-
-
-class RemoteActionIn(BaseModel):
-    kind: Literal["click", "type", "press", "scroll", "goto"]
-    x: int | None = None
-    y: int | None = None
-    text: str | None = None
-    key: str | None = None
-    url: str | None = None
-    dy: int | None = None
-
-
-class CredentialIn(BaseModel):
-    secret: str
-    uid: str = ""
-    save: bool = True
-
-
 # ---------------- 会话 ----------------
 
 @app.get("/healthz")
@@ -171,54 +144,6 @@ def logout(response: Response) -> dict:
     return {"ok": True}
 
 
-@app.get("/api/diagnose")
-async def diagnose(launch: int = 0, _: None = Auth) -> dict:
-    """环境自检：浏览器通道 / 远程登录起不来时，先看这里。
-
-    `?launch=1` 会真的起一次无头 Chromium，用来确认容器里的浏览器可用。
-    """
-    import os
-    import sys
-
-    info: dict = {
-        "python": sys.version.split()[0],
-        "platform": sys.platform,
-        "display_available": remote_login.display_available(),
-        "headless_env": config.HEADLESS,
-        "data_dir": str(config.DATA_DIR),
-        "data_writable": os.access(config.DATA_DIR, os.W_OK),
-        "browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
-    }
-    try:
-        import playwright  # noqa: F401
-        info["playwright"] = "installed"
-    except Exception as exc:
-        info["playwright"] = f"missing: {type(exc).__name__}"
-
-    bp = info["browsers_path"]
-    if bp and os.path.isdir(bp):
-        try:
-            info["browsers"] = sorted(os.listdir(bp))[:10]
-        except Exception:
-            info["browsers"] = "unreadable"
-    else:
-        info["browsers"] = "n/a"
-
-    if launch:
-        try:
-            from playwright.async_api import async_playwright
-            pw = await async_playwright().start()
-            try:
-                br = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-                await br.close()
-                info["launch"] = "ok"
-            finally:
-                await pw.stop()
-        except Exception as exc:
-            info["launch"] = f"fail: {type(exc).__name__}: {str(exc)[:200]}"
-    return info
-
-
 # ---------------- 概览 ----------------
 
 @app.get("/api/overview")
@@ -226,27 +151,19 @@ def overview(_: None = Auth) -> dict:
     sites = db.one("SELECT COUNT(*) c FROM sites WHERE enabled=1")["c"]
     accounts = db.one("SELECT COUNT(*) c FROM accounts WHERE enabled=1")["c"]
     quota_row = db.one("SELECT COALESCE(SUM(quota),0) s FROM accounts WHERE enabled=1") or {"s": 0}
-    today = date.today().isoformat()
-    done = db.one("SELECT COUNT(*) c FROM accounts WHERE enabled=1 AND last_checkin_date=?",
-                  (today,))["c"]
-    week = (datetime.now() - timedelta(days=7)).date().isoformat()
-    agg = db.one(
-        "SELECT COUNT(*) total, COALESCE(SUM(ok),0) okc, COALESCE(SUM(gained),0) gained"
-        " FROM checkin_logs WHERE substr(ts,1,10) >= ?", (week,))
-    total = agg["total"] or 0
-    series = db.rows(
-        "SELECT substr(ts,1,10) d, COALESCE(SUM(gained),0) g, COUNT(*) n, COALESCE(SUM(ok),0) okc"
-        " FROM checkin_logs WHERE substr(ts,1,10) >= ? GROUP BY d ORDER BY d",
-        ((datetime.now() - timedelta(days=13)).date().isoformat(),))
+    last = db.one("SELECT MAX(last_checkin_at) t FROM accounts") or {"t": None}
+
+    cards = db.rows(
+        "SELECT s.id, s.name, s.base_url, s.enabled, s.note,"
+        " COUNT(a.id) AS acc_count, COALESCE(SUM(a.quota),0) AS quota"
+        " FROM sites s LEFT JOIN accounts a ON a.site_id=s.id AND a.enabled=1"
+        " GROUP BY s.id ORDER BY s.id")
     return {
         "sites": sites,
         "accounts": accounts,
         "total_quota": round(quota_row["s"] or 0, 4),
-        "today_done": done,
-        "success_rate": round(agg["okc"] / total, 3) if total else None,
-        "week_gained": round(agg["gained"] or 0, 4),
-        "series": series,
-        "plan": scheduler.plan(),
+        "last_refresh": last["t"],
+        "cards": cards,
     }
 
 
@@ -381,208 +298,22 @@ def delete_account(aid: int, _: None = Auth) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/accounts/{aid}/checkin")
-async def checkin_one(aid: int, _: None = Auth) -> dict:
-    return await runner.run_account_checkin(aid, trigger="manual")
-
-
 @app.post("/api/accounts/{aid}/refresh")
 async def refresh_one(aid: int, _: None = Auth) -> dict:
     return await runner.refresh_account(aid)
 
 
-@app.post("/api/checkin/all")
-async def checkin_all(_: None = Auth) -> dict:
+@app.post("/api/accounts/{aid}/refresh-all")
+async def refresh_all(_: None = Auth) -> dict:
     ids = [r["id"] for r in db.rows("SELECT id FROM accounts WHERE enabled=1 ORDER BY id")]
-    if not ids:
-        return {"ok": True, "results": []}
-    sem = asyncio.Semaphore(3)
-
-    async def one(aid: int) -> dict:
-        async with sem:
-            return {"account_id": aid, **(await runner.run_account_checkin(aid, trigger="manual"))}
-
-    results = await asyncio.gather(*(one(i) for i in ids), return_exceptions=True)
-    clean = []
-    for r in results:
-        if isinstance(r, Exception):
-            clean.append({"ok": False, "message": f"{type(r).__name__}: {r}"})
-        else:
-            clean.append(r)
-    return {"ok": True, "results": clean}
-
-
-@app.post("/api/accounts/{aid}/oauth")
-async def oauth_account(aid: int, _: None = Auth) -> dict:
-    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
-    if not acc:
-        raise HTTPException(404, "账号不存在")
-    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
-    secret = crypto.decrypt(acc["secret_enc"])
-    if not secret:
-        raise HTTPException(400, "请先在账号里填入 linux.do 的 _t Cookie")
-    try:
-        cookie = await browser.browser_oauth_linuxdo(site, acc, secret)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    db.run("UPDATE accounts SET secret_enc=?, auth_mode='cookie', last_error='' WHERE id=?",
-           (crypto.encrypt(cookie), aid))
-    return {"ok": True, "message": "OAuth 完成，已切换为 Cookie 模式"}
-
-
-def _save_site_session(aid: int, cookie: str) -> None:
-    """把一次授权换来的站点会话写回账号，切成可自动续期的授权模式。"""
-    db.run(
-        "UPDATE accounts SET secret_enc=?, auth_mode='linuxdo_browser', last_error='',"
-        " last_result='' WHERE id=?",
-        (crypto.encrypt(cookie), aid),
-    )
-
-
-@app.post("/api/accounts/{aid}/browser-login")
-async def browser_login(aid: int, body: BrowserLoginIn, _: None = Auth) -> dict:
-    """走一遍 linux.do 授权并保存站点会话。
-
-    headless=false 需要服务端有显示环境（本机 / 带桌面的机器），窗口里由用户点一次
-    「Continue with LinuxDO」；headless=true 则复用 profile 里已导入的 linux.do 会话。
-    """
-    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
-    if not acc:
-        raise HTTPException(404, "账号不存在")
-    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
-    if not site:
-        raise HTTPException(404, "站点不存在")
-    if not body.headless and not remote_login.display_available():
-        raise HTTPException(
-            400,
-            "当前服务端没有显示环境（Docker / 无桌面），无法弹出浏览器窗口。"
-            "请改用「远程登录（网页内完成）」，或导入 linux.do cookie。",
-        )
-    try:
-        cookie = await browser.browser_login_linuxdo(
-            site, acc, headless=body.headless, timeout_s=body.timeout)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    _save_site_session(aid, cookie)
-    return {"ok": True, "message": "授权成功，站点会话已保存"}
-
-
-@app.post("/api/accounts/{aid}/idp-cookies")
-async def idp_cookies(aid: int, body: IdpCookiesIn, _: None = Auth) -> dict:
-    """导入浏览器导出的 linux.do cookie，再（可选）当场验证能否换到站点会话。
-
-    这是服务器部署的可行路径：用户不必再去找 `_t`，把 cookie 扩展导出的整段 JSON
-    粘进来即可。cookie 只写入该账号的浏览器 profile，不落库。
-    """
-    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
-    if not acc:
-        raise HTTPException(404, "账号不存在")
-    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
-    if not site:
-        raise HTTPException(404, "站点不存在")
-    try:
-        count = await browser.inject_idp_cookies(site, acc, body.cookies)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
-    result: dict = {"ok": True, "injected": count, "verified": None}
-    if body.verify:
+    results = []
+    for aid in ids:
         try:
-            cookie = await browser.browser_login_linuxdo(site, acc, headless=True, timeout_s=180)
-        except adapters.SiteError as exc:
-            result.update(verified=False,
-                          message=f"Cookie 已导入，但换站点会话失败：{exc}")
-            return result
-        _save_site_session(aid, cookie)
-        result.update(verified=True, message="已导入并验证成功，站点会话已保存")
-    else:
-        result["message"] = f"已导入 {count} 条 cookie，未验证"
-    return result
-
-
-# ---------------- 远程登录（网页内操作无头浏览器） ----------------
-
-def _account_and_site(aid: int) -> tuple[dict, dict]:
-    acc = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
-    if not acc:
-        raise HTTPException(404, "账号不存在")
-    site = db.one("SELECT * FROM sites WHERE id=?", (acc["site_id"],))
-    if not site:
-        raise HTTPException(404, "站点不存在")
-    return acc, site
-
-
-@app.post("/api/accounts/{aid}/probe-credential")
-async def probe_credential(aid: int, body: CredentialIn, _: None = Auth) -> dict:
-    """探测一段凭据该怎么用：Cookie 还是 access token，需不需要 New-Api-User。
-
-    命中后按命中的方式保存（含自动取到的 uid），失败则把每种尝试的状态码与站点
-    原始提示一并返回，省掉「401 但不知道为什么」的来回试错。
-    """
-    _acc, site = _account_and_site(aid)
-    try:
-        result = await adapters.probe_auth(site, body.secret, body.uid)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    if result.get("ok") and body.save:
-        db.run(
-            "UPDATE accounts SET secret_enc=?, auth_mode=?, uid=?, last_error='' WHERE id=?",
-            (crypto.encrypt(body.secret.strip()), result["mode"], result["uid"], aid),
-        )
-        result["saved"] = True
-    else:
-        result["saved"] = False
-    return result
-
-
-@app.post("/api/accounts/{aid}/remote-login/start")
-async def remote_login_start(aid: int, _: None = Auth) -> dict:
-    """开一个远程登录会话：无头浏览器打开站点登录页，返回首帧截图。
-
-    用于服务器 / Docker 这类没有显示环境、又必须人工完成 OAuth 的场景。
-    """
-    acc, site = _account_and_site(aid)
-    try:
-        frame = await remote_login.start(site, acc)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "frame": frame, "display_available": remote_login.display_available()}
-
-
-@app.get("/api/accounts/{aid}/remote-login/frame")
-async def remote_login_frame(aid: int, _: None = Auth) -> dict:
-    sess = remote_login.get(aid)
-    if not sess:
-        raise HTTPException(404, "远程登录会话已结束，请重新开始")
-    return {"ok": True, "frame": await sess.snapshot()}
-
-
-@app.post("/api/accounts/{aid}/remote-login/action")
-async def remote_login_action(aid: int, body: RemoteActionIn, _: None = Auth) -> dict:
-    try:
-        frame = await remote_login.act(
-            aid, body.kind, x=body.x, y=body.y, text=body.text,
-            key=body.key, url=body.url, dy=body.dy)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "frame": frame}
-
-
-@app.post("/api/accounts/{aid}/remote-login/finish")
-async def remote_login_finish(aid: int, _: None = Auth) -> dict:
-    try:
-        cookie = await remote_login.finish(aid)
-    except adapters.SiteError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    _save_site_session(aid, cookie)
-    return {"ok": True, "message": "登录完成，站点会话已保存"}
-
-
-@app.post("/api/accounts/{aid}/remote-login/close")
-async def remote_login_close(aid: int, _: None = Auth) -> dict:
-    await remote_login.close(aid)
-    return {"ok": True}
+            results.append({"account_id": aid, **(await runner.refresh_account(aid))})
+        except Exception as exc:  # 单账号失败不影响其它
+            results.append({"account_id": aid, "ok": False,
+                            "message": f"{type(exc).__name__}: {exc}"})
+    return {"ok": True, "results": results}
 
 
 # ---------------- 日志 / 设置 ----------------
